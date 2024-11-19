@@ -114,10 +114,10 @@ std::expected<std::uint64_t, std::string> Exchange::AddOrder(
         }
         if (quantity > 0) {
             if (side == Side::BUY) {
-                m_bidPriceMap[price] = m_bidOrderCount;
+                m_bidPriceMap[m_bidOrderCount] = price;
             }
             else {
-                m_askPriceMap[price] = m_bidOrderCount;
+                m_askPriceMap[m_askOrderCount] = price;
             }
             targetMap[instrument][price].push_back(
                 Order{side == Side::BUY ? m_bidOrderCount++ : m_askOrderCount++,
@@ -149,6 +149,7 @@ bool Exchange::RemoveOrder(const std::string &instrument, Side side,
                 price_level.erase(order_iter);
                 return true;
             }
+            ++order_iter;
         }
         return false;
     };
@@ -234,7 +235,12 @@ int main()
     // Clear through two and a bit orders on level
     assert(ex.AddOrder("AAPL", Side::SELL, 69, 1750));
 
+    // Add some more resting orders
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+    assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+
+    // Test removing one
+    assert(ex.RemoveOrder("AAPL", Side::BUY, 6));
 
     ex.printInstrumentBooks("AAPL");
     std::cout << "\n";
