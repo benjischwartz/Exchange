@@ -67,6 +67,7 @@ class Exchange : public IExchange {
     OrderMapT<std::less<PriceT>> m_askMap;
     OrderMapT<std::greater<PriceT>> m_bidMap;
 
+    // TODO: Make these per instrument (nested map)
     std::unordered_map<uint64_t /* orderId */, PriceT> m_bidPriceMap;
     std::unordered_map<uint64_t /* orderId */, PriceT> m_askPriceMap;
 
