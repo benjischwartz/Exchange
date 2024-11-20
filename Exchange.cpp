@@ -70,6 +70,9 @@ class Exchange : public IExchange {
     std::unordered_map<uint64_t /* orderId */, PriceT> m_bidPriceMap;
     std::unordered_map<uint64_t /* orderId */, PriceT> m_askPriceMap;
 
+    std::unordered_map<PriceT, uint32_t> m_bidQuantityMap;
+    std::unordered_map<PriceT, uint32_t> m_askQuantityMap;
+
     // For generating unique order IDs
     uint64_t m_bidOrderCount = 0;
     uint64_t m_askOrderCount = 0;
@@ -81,7 +84,8 @@ std::expected<std::uint64_t, std::string> Exchange::AddOrder(
 {
     bool best_price_changed = false;
     auto process_orders = [&](auto &targetMap, auto &oppositeMap,
-                              auto &&priceMatch) {
+                              auto &targetQuantityMap,
+                              auto &oppositeQuantityMap, auto &&priceMatch) {
         auto price_iter = oppositeMap[instrument].begin();
         while (price_iter != oppositeMap[instrument].end() &&
                priceMatch(price_iter->first, price)) {
@@ -93,6 +97,8 @@ std::expected<std::uint64_t, std::string> Exchange::AddOrder(
                     OrderTraded(instrument, order_iter->orderId,
                                 price_iter->first, order_iter->quantity);
                     quantity -= order_iter->quantity;
+                    oppositeQuantityMap[price_iter->first] -=
+                        order_iter->quantity;
                     order_iter = orders.erase(order_iter);
                 }
                 // Partial trade
@@ -100,12 +106,14 @@ std::expected<std::uint64_t, std::string> Exchange::AddOrder(
                     OrderTraded(instrument, order_iter->orderId,
                                 price_iter->first, quantity);
                     order_iter->quantity -= quantity;
+                    oppositeQuantityMap[price_iter->first] -= quantity;
                     quantity = 0;
                 }
             }
             if (orders.empty()) {
                 // Remove price level if all orders are processed
                 best_price_changed = true;
+                oppositeQuantityMap.erase(price_iter->first);
                 price_iter = oppositeMap[instrument].erase(price_iter);
             }
             else {
@@ -122,22 +130,35 @@ std::expected<std::uint64_t, std::string> Exchange::AddOrder(
             targetMap[instrument][price].push_back(
                 Order{side == Side::BUY ? m_bidOrderCount++ : m_askOrderCount++,
                       quantity});
+            targetQuantityMap[price] += quantity;
         }
     };
 
     if (side == Side::BUY) {
-        process_orders(m_bidMap, m_askMap, std::less_equal<PriceT>{});
+        process_orders(m_bidMap, m_askMap, m_bidQuantityMap, m_askQuantityMap,
+                       std::less_equal<PriceT>{});
     }
     else {
-        process_orders(m_askMap, m_bidMap, std::greater_equal<PriceT>{});
+        process_orders(m_askMap, m_bidMap, m_askQuantityMap, m_bidQuantityMap,
+                       std::greater_equal<PriceT>{});
     }
+
+    if (best_price_changed || !best_price_changed) {
+        PriceT best_bid_price = m_bidMap[instrument].begin()->first;
+        PriceT best_ask_price = m_askMap[instrument].begin()->first;
+        BestPriceChanged(instrument, best_bid_price,
+                         m_bidQuantityMap[best_bid_price], best_ask_price,
+                         m_askQuantityMap[best_ask_price]);
+    }
+
     return 0;
 }
 
 bool Exchange::RemoveOrder(const std::string &instrument, Side side,
                            std::uint64_t orderId)
 {
-    auto remove_order = [&](auto &targetMap, auto &targetPriceMap) {
+    auto remove_order = [&](auto &targetMap, auto &targetPriceMap,
+                            auto &targetQuantityMap) {
         if (!targetMap.count(instrument) || !targetPriceMap.count(orderId)) {
             return false;
         }
@@ -146,6 +167,7 @@ bool Exchange::RemoveOrder(const std::string &instrument, Side side,
         auto order_iter = price_level.begin();
         while (order_iter != price_level.end()) {
             if (order_iter->orderId == orderId) {
+                targetQuantityMap[price] -= order_iter->quantity;
                 price_level.erase(order_iter);
                 return true;
             }
@@ -155,10 +177,10 @@ bool Exchange::RemoveOrder(const std::string &instrument, Side side,
     };
 
     if (side == Side::BUY) {
-        return remove_order(m_bidMap, m_bidPriceMap);
+        return remove_order(m_bidMap, m_bidPriceMap, m_bidQuantityMap);
     }
     else {
-        return remove_order(m_askMap, m_askPriceMap);
+        return remove_order(m_askMap, m_askPriceMap, m_askQuantityMap);
     }
 }
 
@@ -193,7 +215,7 @@ int main()
     auto orderTraded = [](const std::string &instrument, std::int64_t orderId,
                           std::uint64_t tradedPrice,
                           std::int64_t tradedQuantity) {
-        std::cout << "Order Traded: Instrument=" << instrument
+        std::cout << "Order Traded!\nInstrument=" << instrument
                   << ", OrderId=" << orderId << ", TradedPrice=" << tradedPrice
                   << ", Traded Quantity=" << tradedQuantity << "\n";
     };
@@ -201,7 +223,7 @@ int main()
         [](const std::string &instrument, std::int64_t bidPrice,
            std::uint32_t bidTotalQuantity, std::int64_t askPrice,
            std::int32_t askTotalQuantity) {
-            std::cout << "Order Traded: Instrument=" << instrument
+            std::cout << "Best Price Changed!\nInstrument=" << instrument
                       << ", BidPrice=" << bidPrice
                       << ", BidTotalQuantity=" << bidTotalQuantity
                       << ", AskPrice=" << askPrice
@@ -212,35 +234,72 @@ int main()
 
     // Add some resting orders
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::SELL, 75, 750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::BUY, 70, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::SELL, 76, 750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::BUY, 68, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::SELL, 73, 750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Partial order executes
     assert(ex.AddOrder("AAPL", Side::SELL, 70, 750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Level clears
     assert(ex.AddOrder("AAPL", Side::SELL, 70, 750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Clear a level, then partially another level
     assert(ex.AddOrder("AAPL", Side::BUY, 73, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Add on existing levels
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 500));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::BUY, 68, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Clear through two and a bit orders on level
     assert(ex.AddOrder("AAPL", Side::SELL, 69, 1750));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Add some more resting orders
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
     assert(ex.AddOrder("AAPL", Side::BUY, 69, 1000));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     // Test removing one
     assert(ex.RemoveOrder("AAPL", Side::BUY, 6));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
+
+    // Test fail removing
+    assert(!ex.RemoveOrder("AAPL", Side::BUY, 3));
+    ex.printInstrumentBooks("AAPL");
+    std::cout << "\n";
 
     ex.printInstrumentBooks("AAPL");
     std::cout << "\n";
